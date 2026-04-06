@@ -2,6 +2,12 @@
 
 本文档说明如何把 Turso 里的源数据拉回本地 sqlite，并在本地生成可回测用的 runtime 分区表。
 
+默认主库:
+
+- [`outputs/minute_data/stock_data.db`](/Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db)
+
+除非是隔离测试或调试，下面的命令都建议直接落到这份主库。
+
 目标数据流:
 
 ```text
@@ -52,7 +58,7 @@ export TURSO_AUTH_TOKEN="your-token"
 
 ```bash
 python scripts/pull_turso_source_tables.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --from-date 2024-03-28 \
   --to-date 2026-03-27 \
   --tables stock_daily,stock_5_min,stock_1_min_mock \
@@ -69,7 +75,7 @@ python scripts/pull_turso_source_tables.py \
 拉取完成后，可以快速看一下本地计数:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT 'stock_daily', COUNT(*) FROM stock_daily
 UNION ALL
 SELECT 'stock_5_min', COUNT(*) FROM stock_5_min
@@ -84,7 +90,7 @@ SELECT 'stock_1_min_mock', COUNT(*) FROM stock_1_min_mock;
 
 ```bash
 python scripts/build_partitioned_runtime.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --from-date 2024-03-28 \
   --to-date 2026-03-27 \
   --date-partition year \
@@ -96,14 +102,15 @@ python scripts/build_partitioned_runtime.py \
 1. 读取本地 `stock_daily`
 2. 使用本地 `stock_1_min_mock` 作为 stretch 模板
 3. 生成本地 `stock_1_min_fake`
-4. 以 `fake -> mock` 的顺序写入 runtime 分区表
-5. 用 `mock` 覆盖同 `(symbol, timestamp)` 的 `fake`
-6. 维护一张注册表 `runtime_partition_registry`
+4. 生成本地 `stock_1_min_synthetic`
+5. 以 `synthetic -> fake -> mock` 的顺序写入 runtime 分区表
+6. 用 `mock` 覆盖同 `(symbol, timestamp)` 的 `fake/synthetic`
+7. 维护一张注册表 `runtime_partition_registry`
 
-其中 runtime 的优先级仍然是:
+其中 runtime 的优先级是:
 
 ```text
-mock > fake
+mock > fake > synthetic
 ```
 
 ## 分区表与注册表
@@ -128,7 +135,7 @@ mock > fake
 查看所有 runtime 分区:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT table_name, symbol, partition_value, row_count, trading_day_count
 FROM runtime_partition_registry
 ORDER BY symbol, partition_value;
@@ -153,7 +160,7 @@ ORDER BY symbol, partition_value;
 
 ```bash
 python scripts/pull_turso_source_tables.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --from-date 2024-03-28 \
   --to-date 2026-03-27 \
   --tables stock_daily,stock_5_min,stock_1_min_mock \
@@ -164,7 +171,7 @@ python scripts/pull_turso_source_tables.py \
 
 ```bash
 python scripts/build_partitioned_runtime.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --from-date 2024-03-28 \
   --to-date 2026-03-27 \
   --date-partition year \
@@ -176,7 +183,7 @@ python scripts/build_partitioned_runtime.py \
 看本地源表计数:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT 'stock_daily', COUNT(*) FROM stock_daily
 UNION ALL
 SELECT 'stock_5_min', COUNT(*) FROM stock_5_min
@@ -190,7 +197,7 @@ SELECT 'stock_1_min_fake', COUNT(*) FROM stock_1_min_fake;
 看 runtime 分区数量和总行数:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT COUNT(*) AS partition_count, COALESCE(SUM(row_count), 0) AS total_rows
 FROM runtime_partition_registry;
 "
@@ -199,7 +206,7 @@ FROM runtime_partition_registry;
 看某个 symbol 的分区情况:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT table_name, row_count, trading_day_count
 FROM runtime_partition_registry
 WHERE symbol = '600519'

@@ -58,7 +58,6 @@ The strategy depends on legacy-style minute simulation built from a sqlite datab
 Current database path:
 
 - `outputs/minute_data/stock_data.db`
-- `outputs/turso_runtime/turso_2y_all.db`
 
 Key tables:
 
@@ -73,15 +72,17 @@ Key tables:
 
 Current partitioned runtime db facts in this repository:
 
-- sqlite file: `outputs/turso_runtime/turso_2y_all.db`
+- sqlite file: `outputs/minute_data/stock_data.db`
 - registry partition count: `90`
-- runtime rows via registry: `3,473,520`
+- runtime rows via registry: `3,474,240`
 - runtime date range: `2024-03-28` to `2026-03-27`
-- runtime symbols in registry: `28`
+- runtime symbols in registry: `30`
 
 There is also a legacy single-table runtime path in this repository:
 
 - `stock_1_min_runtime`
+
+In the main database, that legacy runtime table is now intentionally cleared, and the active backtest path is the partitioned registry-based runtime.
 
 But the current RQAlpha minute source mod has already been updated to support partitioned runtime through:
 
@@ -189,40 +190,33 @@ Result:
 
 This is the first hard criterion that now has to pass before taking any backtest result seriously.
 
-Current validated partitioned window:
+Current validated partitioned main-db window:
 
-- `2026-03-03` to `2026-03-27`
+- `2024-03-28` to `2026-03-27`
 
 Command:
 
 ```bash
 python scripts/validate_minute_runtime_data.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --runtime-registry-table runtime_partition_registry \
-  --from-date 2026-03-03 \
+  --symbols 000069,000423,000538,000725,000895,002033,300122,300142,600000,600016,600030,600036,600059,600085,600111,600138,600161,600276,600315,600332,600436,600456,600519,600535,600600,600887,601088,601222,601318,601888 \
+  --from-date 2024-03-28 \
   --to-date 2026-03-27
 ```
 
 Result:
 
-- `total_daily_symbol_days = 530`
-- `total_runtime_symbol_days = 530`
+- `total_daily_symbol_days = 14476`
+- `total_runtime_symbol_days = 14476`
 - `missing = 0`
 - `extra = 0`
 - `partial = 0`
 - `volume_anomaly = 0`
 - `validation_status = PASS`
+- `perfect_symbols = 30/30`
 
-Current partitioned one-year status on the 2-year cache:
-
-- checked window: `2024-03-28` to `2025-03-27`
-- result: `FAIL`
-- missing symbol-days: `3`
-- missing details:
-  - `000069.XSHE`: `2024-09-27`, `2024-09-30`
-  - `600030.XSHG`: `2024-10-08`
-
-That means the current partitioned cache is already usable for some windows, but this specific one-year window should not yet be treated as trustworthy from the partitioned path.
+This means the current main database now holds a complete 2-year partitioned runtime window for the 30-symbol working set.
 
 ## 8. Current Verified Backtest Result in This Repository
 
@@ -277,18 +271,18 @@ python -m rqalpha run \
   -fq 1m \
   --account stock 1000000 \
   -mc sys_analyser.enabled True \
-  -mc sys_analyser.output_file outputs/backtest/cursor_layered_partitioned_short_verify.pkl \
-  -mc sys_analyser.report_save_path outputs/backtest/cursor_layered_partitioned_short_verify_report \
+  -mc sys_analyser.output_file outputs/backtest/cursor_layered_partitioned_short_verify_main.pkl \
+  -mc sys_analyser.report_save_path outputs/backtest/cursor_layered_partitioned_short_verify_main_report \
   -mc legacy_1m_source.enabled True \
   -mc legacy_1m_source.lib rqalpha.examples.data_source.rqalpha_mod_legacy_1m_source \
-  -mc legacy_1m_source.sqlite_path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/turso_runtime/turso_2y_all.db \
+  -mc legacy_1m_source.sqlite_path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db \
   -mc legacy_1m_source.runtime_registry_table runtime_partition_registry
 ```
 
 Artifacts:
 
-- `outputs/backtest/cursor_layered_partitioned_short_verify.pkl`
-- `outputs/backtest/cursor_layered_partitioned_short_verify_report/summary.xlsx`
+- `outputs/backtest/cursor_layered_partitioned_short_verify_main.pkl`
+- `outputs/backtest/cursor_layered_partitioned_short_verify_main_report/summary.xlsx`
 
 Result summary:
 
@@ -350,15 +344,16 @@ Practical conclusion:
 2. Runtime validation exists and is actionable.
 3. The strategy can be executed reproducibly in minute frequency.
 4. The target clone reproduces a full one-year backtest successfully on the historical legacy runtime path.
-5. Strategy-side event and day ledgers make component analysis possible.
+5. The main database now also provides a complete 2-year partitioned runtime window for minute backtests.
+6. Strategy-side event and day ledgers make component analysis possible.
 
 ## 11. What Is Still Fragile or Incomplete
 
-1. The partitioned runtime path now runs, but the current `turso_2y_all.db` cache is not yet complete for every one-year verification window.
+1. The partitioned runtime path now runs from the main database, but long-window strategy verification on that partitioned path has not yet been rerun beyond the short verified window.
 2. Reverse T remains quantitatively weak even after the execution-path fix.
 3. Volume-limit warnings still appear frequently in minute backtests.
 4. The strategy can become inactive for long periods due to the interaction between `buy_permission`, exit timing, and held inventory.
-5. The most recent partitioned verification in this clone is a short window. The historical one-year result is still the legacy single-table run.
+5. The historical one-year result is still the legacy single-table run; it has not yet been replayed on the rebuilt main-db partitioned runtime.
 
 ## 12. Recommended Operating Procedure
 
@@ -375,8 +370,9 @@ Recommended command sequence:
 ```bash
 # 1. Validate minute runtime
 python scripts/validate_minute_runtime_data.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --runtime-registry-table runtime_partition_registry \
+  --symbols 000069,000423,000538,000725,000895,002033,300122,300142,600000,600016,600030,600036,600059,600085,600111,600138,600161,600276,600315,600332,600436,600456,600519,600535,600600,600887,601088,601222,601318,601888 \
   --from-date 2026-03-03 \
   --to-date 2026-03-27
 
@@ -387,25 +383,25 @@ python -m rqalpha run \
   -fq 1m \
   --account stock 1000000 \
   -mc sys_analyser.enabled True \
-  -mc sys_analyser.output_file outputs/backtest/cursor_layered_partitioned_short_verify.pkl \
-  -mc sys_analyser.report_save_path outputs/backtest/cursor_layered_partitioned_short_verify_report \
+  -mc sys_analyser.output_file outputs/backtest/cursor_layered_partitioned_short_verify_main.pkl \
+  -mc sys_analyser.report_save_path outputs/backtest/cursor_layered_partitioned_short_verify_main_report \
   -mc legacy_1m_source.enabled True \
   -mc legacy_1m_source.lib rqalpha.examples.data_source.rqalpha_mod_legacy_1m_source \
-  -mc legacy_1m_source.sqlite_path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/turso_runtime/turso_2y_all.db \
+  -mc legacy_1m_source.sqlite_path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db \
   -mc legacy_1m_source.runtime_registry_table runtime_partition_registry
 
 # 3. Optional: component split
 python scripts/cursor_layered_component_report.py \
   --event-csv outputs/backtest/cursor_layered_debug/cursor_layered_events_20260303_20260327.csv \
   --day-csv outputs/backtest/cursor_layered_debug/cursor_layered_day_summary_20260303_20260327.csv \
-  --result-pickle outputs/backtest/cursor_layered_partitioned_short_verify.pkl \
-  --report-dir outputs/backtest/cursor_layered_partitioned_short_verify_report \
+  --result-pickle outputs/backtest/cursor_layered_partitioned_short_verify_main.pkl \
+  --report-dir outputs/backtest/cursor_layered_partitioned_short_verify_main_report \
   --output-dir outputs/backtest/cursor_layered_debug/partitioned_short_component_report
 
 # 4. Optional: equal-weight benchmark post-processing
 python scripts/equal_weight_benchmark_report.py \
-  --result-pickle outputs/backtest/cursor_layered_partitioned_short_verify.pkl \
-  --sqlite-path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/turso_runtime/turso_2y_all.db \
+  --result-pickle outputs/backtest/cursor_layered_partitioned_short_verify_main.pkl \
+  --sqlite-path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db \
   --output-csv outputs/backtest/cursor_layered_partitioned_short_equal_weight_benchmark.csv
 ```
 
@@ -416,7 +412,7 @@ If work continues from the current state, the best next steps are:
 1. rerun a 3-year or 4-year validation in this clone, not only in the source workspace
 2. regenerate component analysis in this clone for a wider window
 3. specifically analyze long inactive periods caused by frozen `buy_permission`
-4. refill or repair the missing partitioned symbol-days before trusting the 2024-03-28 to 2025-03-27 one-year window
+4. rerun a one-year or wider strategy backtest on the rebuilt main-db partitioned runtime, not only the short verification window
 5. keep the validation gate mandatory before every serious backtest conclusion
 
 ## 14. Bottom Line
@@ -430,11 +426,12 @@ Current state:
 - runtime validation exists
 - target clone migration is complete
 - historical one-year legacy minute backtest in this clone has been verified successfully
+- main database partitioned runtime now covers `2024-03-28 -> 2026-03-27` with `30` symbols and passes validation
 - partitioned runtime minute backtest in this clone has been verified successfully on a short window
 
 The current conclusion that is safe to state is:
 
 - the build and backtest workflow is now operational and reproducible in both legacy and partitioned forms
 - the one-year migrated legacy run is credible enough to use as a baseline
-- the partitioned path is technically runnable, but window-level data completeness still has to be checked before trusting longer results
+- the partitioned path is technically runnable and the main database now has a validated 2-year runtime window, but longer strategy backtests should still be rerun explicitly before drawing strategy conclusions
 - future strategy evaluation should focus more on component quality and state behavior than on raw backtest execution correctness

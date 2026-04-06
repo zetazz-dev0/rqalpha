@@ -16,6 +16,12 @@
 - 已使用:
   - [`scripts/build_partitioned_runtime.py`](/Users/zeta/Projects/zetazz-dev0/rqalpha/scripts/build_partitioned_runtime.py)
 
+默认主库:
+
+- [`outputs/minute_data/stock_data.db`](/Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db)
+
+除非是隔离测试或调试，不建议再把回测流程切到其他 sqlite 文件。
+
 当前仓库中，分区 runtime 的读取入口是:
 
 - [`rqalpha/examples/data_source/rqalpha_mod_legacy_1m_source.py`](/Users/zeta/Projects/zetazz-dev0/rqalpha/rqalpha/examples/data_source/rqalpha_mod_legacy_1m_source.py)
@@ -33,7 +39,7 @@
 
 ```bash
 python scripts/validate_minute_runtime_data.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --runtime-registry-table runtime_partition_registry \
   --from-date 2024-03-28 \
   --to-date 2026-03-27
@@ -43,7 +49,7 @@ python scripts/validate_minute_runtime_data.py \
 
 ```bash
 python scripts/validate_minute_runtime_data.py \
-  --sqlite-path outputs/turso_runtime/turso_2y_all.db \
+  --sqlite-path outputs/minute_data/stock_data.db \
   --runtime-registry-table runtime_partition_registry \
   --symbols 600519,000725,601222 \
   --from-date 2024-03-28 \
@@ -65,7 +71,7 @@ python -m rqalpha run \
   --account stock 1000000 \
   -mc legacy_1m_source.enabled True \
   -mc legacy_1m_source.lib rqalpha.examples.data_source.rqalpha_mod_legacy_1m_source \
-  -mc legacy_1m_source.sqlite_path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/turso_runtime/turso_2y_all.db \
+  -mc legacy_1m_source.sqlite_path /Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db \
   -mc legacy_1m_source.runtime_registry_table runtime_partition_registry
 ```
 
@@ -120,14 +126,14 @@ AttributeError: 'RqAttrDict' object has no attribute 'enabled'
 2. `runtime_partition_registry` 比单表更适合窗口化回测，库体积和重建成本都更可控。
 3. 回测前先跑校验脚本，能提前发现缺 symbol、缺交易日、缺分钟线的问题。
 4. `minute_table` 可保留给旧流程调试，但在设置了 `runtime_registry_table` 后，实际读取路径会走 registry 模式。
-5. 建议把回测日期压在 registry 可覆盖的窗口内。当前实测库 [`outputs/turso_runtime/turso_2y_all.db`](/Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/turso_runtime/turso_2y_all.db) 的可用范围是 `2024-03-28 -> 2026-03-27`。
+5. 建议把回测日期压在 registry 可覆盖的窗口内。主库默认使用 [`outputs/minute_data/stock_data.db`](/Users/zeta/Projects/zetazz-dev0/rqalpha/outputs/minute_data/stock_data.db)。
 
 ## 常用排查
 
 看有哪些 runtime 分区:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT table_name, symbol, partition_value, row_count, trading_day_count
 FROM runtime_partition_registry
 ORDER BY symbol, partition_value;
@@ -137,7 +143,7 @@ ORDER BY symbol, partition_value;
 看某个 symbol 的分区:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT table_name, from_date, to_date, row_count, trading_day_count
 FROM runtime_partition_registry
 WHERE symbol = '600519'
@@ -148,7 +154,7 @@ ORDER BY partition_value;
 看回测窗口是否超出当前库覆盖范围:
 
 ```bash
-sqlite3 outputs/turso_runtime/turso_2y_all.db "
+sqlite3 outputs/minute_data/stock_data.db "
 SELECT MIN(from_date), MAX(to_date)
 FROM runtime_partition_registry;
 "

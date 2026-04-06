@@ -11,7 +11,7 @@ import libsql_client
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "outputs", "minute_data", "turso_source_cache.db")
+DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "outputs", "minute_data", "stock_data.db")
 TABLE_NAMES = ("stock_daily", "stock_5_min", "stock_1_min_mock")
 ROW_COLUMNS = ("symbol", "timestamp", "open", "high", "low", "close", "volume")
 

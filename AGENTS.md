@@ -46,7 +46,7 @@ Recommended runtime storage:
 - partitioned runtime tables produced by `scripts/build_partitioned_runtime.py`
 - registry table: `runtime_partition_registry`
 - default partition naming: `stock_1_min_runtime_p_y<YYYY>_s<SYMBOL>`
-- If same `(symbol, timestamp)` exists in both tables, runtime keeps the `basic/mock` row
+- partitioned runtime merge priority: `basic/mock > stretch/fake > synthetic`
 - partitioned runtime is **runtime/backtest-only** and should be regenerated for the target date window.
 - **Never** backfill full-history simulated data into a single runtime table under any circumstance; runtime must stay window-scoped.
 

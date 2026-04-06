@@ -14,9 +14,11 @@ if SCRIPT_DIR not in sys.path:
 
 from legacy_minute_data_builder import (  # noqa: E402
     EXPECTED_1M_BARS_PER_DAY,
+    delete_symbol_rows,
     ensure_normalized_table,
     ensure_price_table,
     load_minute_rows_for_symbol,
+    rebuild_synthetic_1min_for_symbol,
     rebuild_stretch_1min_for_symbol,
     refresh_normalized_daily_data,
     refresh_template_normalized_daily_data,
@@ -25,12 +27,13 @@ from legacy_minute_data_builder import (  # noqa: E402
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "outputs", "minute_data", "turso_source_cache.db")
+DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "outputs", "minute_data", "stock_data.db")
 DEFAULT_REGISTRY_TABLE = "runtime_partition_registry"
 DEFAULT_RUNTIME_PREFIX = "stock_1_min_runtime_p"
 DEFAULT_NORMALIZED_TABLE = "normalized_daily_ohlc"
 DEFAULT_FAKE_TABLE = "stock_1_min_fake"
 DEFAULT_MOCK_TABLE = "stock_1_min_mock"
+DEFAULT_SYNTHETIC_TABLE = "stock_1_min_synthetic"
 DEFAULT_DAILY_TABLE = "stock_daily"
 
 
@@ -49,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--daily-table", default=DEFAULT_DAILY_TABLE)
     parser.add_argument("--mock-table", default=DEFAULT_MOCK_TABLE)
     parser.add_argument("--fake-table", default=DEFAULT_FAKE_TABLE)
+    parser.add_argument("--synthetic-table", default=DEFAULT_SYNTHETIC_TABLE)
     parser.add_argument("--normalized-table", default=DEFAULT_NORMALIZED_TABLE)
     parser.add_argument("--registry-table", default=DEFAULT_REGISTRY_TABLE)
     parser.add_argument("--runtime-prefix", default=DEFAULT_RUNTIME_PREFIX)
@@ -138,6 +142,27 @@ def partition_table_name(runtime_prefix: str, partition_kind: str, partition_val
         "{}_{}_s{}".format(runtime_prefix, suffix, sanitize_symbol(symbol)),
         "partition_table",
     )
+
+
+def fetch_complete_covered_dates(
+    conn: sqlite3.Connection,
+    table: str,
+    symbol: str,
+    from_date: str,
+    to_date: str,
+) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT DATE(timestamp)
+        FROM {table}
+        WHERE symbol = ?
+          AND DATE(timestamp) BETWEEN ? AND ?
+        GROUP BY DATE(timestamp)
+        HAVING COUNT(*) = ?
+        """.format(table=table),
+        (symbol, from_date, to_date, int(EXPECTED_1M_BARS_PER_DAY)),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 def iter_partition_specs(
@@ -240,6 +265,7 @@ def main() -> int:
     daily_table = validate_identifier(args.daily_table, "daily_table")
     mock_table = validate_identifier(args.mock_table, "mock_table")
     fake_table = validate_identifier(args.fake_table, "fake_table")
+    synthetic_table = validate_identifier(args.synthetic_table, "synthetic_table")
     registry_table = validate_identifier(args.registry_table, "registry_table")
     runtime_prefix = validate_identifier(args.runtime_prefix, "runtime_prefix")
 
@@ -248,6 +274,7 @@ def main() -> int:
         ensure_price_table(conn, daily_table)
         ensure_price_table(conn, mock_table)
         ensure_price_table(conn, fake_table)
+        ensure_price_table(conn, synthetic_table)
         ensure_normalized_table(conn, normalized_table)
         ensure_normalized_table(conn, template_normalized_table)
         ensure_registry_table(conn, registry_table)
@@ -280,6 +307,8 @@ def main() -> int:
         print("template rows refreshed={}".format(template_rows))
 
         total_fake_rows = 0
+        total_synthetic_rows = 0
+        total_synthetic_days = 0
         for index, symbol in enumerate(symbols, start=1):
             inserted_1m, day_count, matched_days, generated_days = rebuild_stretch_1min_for_symbol(
                 conn=conn,
@@ -296,9 +325,50 @@ def main() -> int:
                 rng=rng,
             )
             total_fake_rows += inserted_1m
+            covered_dates = fetch_complete_covered_dates(
+                conn=conn,
+                table=mock_table,
+                symbol=symbol,
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+            covered_dates |= fetch_complete_covered_dates(
+                conn=conn,
+                table=fake_table,
+                symbol=symbol,
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+            delete_symbol_rows(
+                conn=conn,
+                table=synthetic_table,
+                symbol=symbol,
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+            inserted_syn, syn_daily, syn_generated = rebuild_synthetic_1min_for_symbol(
+                conn=conn,
+                symbol=symbol,
+                output_table=synthetic_table,
+                daily_table=daily_table,
+                from_date=args.from_date,
+                to_date=args.to_date,
+                rng=rng,
+                skip_dates=covered_dates,
+            )
+            total_synthetic_rows += inserted_syn
+            total_synthetic_days += syn_generated
             print(
-                "[{}/{}] {} fake_rows={} daily_days={} matched_days={} generated_days={}".format(
-                    index, len(symbols), symbol, inserted_1m, day_count, matched_days, generated_days
+                "[{}/{}] {} fake_rows={} synthetic_rows={} daily_days={} matched_days={} generated_days={} synthetic_days={}".format(
+                    index,
+                    len(symbols),
+                    symbol,
+                    inserted_1m,
+                    inserted_syn,
+                    day_count,
+                    matched_days,
+                    generated_days,
+                    syn_generated,
                 )
             )
 
@@ -320,6 +390,14 @@ def main() -> int:
                     symbol=symbol,
                 )
                 reset_partition_table(conn, table_name)
+                synthetic_rows = load_minute_rows_for_symbol(
+                    conn=conn,
+                    table=synthetic_table,
+                    symbol=symbol,
+                    from_date=part_from_date,
+                    to_date=part_to_date,
+                    expected_bars_per_day=EXPECTED_1M_BARS_PER_DAY,
+                )
                 fake_rows = load_minute_rows_for_symbol(
                     conn=conn,
                     table=fake_table,
@@ -336,8 +414,9 @@ def main() -> int:
                     to_date=part_to_date,
                     expected_bars_per_day=EXPECTED_1M_BARS_PER_DAY,
                 )
-                inserted_rows = write_partition_rows(conn, table_name, fake_rows)
-                inserted_rows = write_partition_rows(conn, table_name, mock_rows) or inserted_rows
+                write_partition_rows(conn, table_name, synthetic_rows)
+                write_partition_rows(conn, table_name, fake_rows)
+                write_partition_rows(conn, table_name, mock_rows)
                 row_count = int(conn.execute("SELECT COUNT(*) FROM {}".format(table_name)).fetchone()[0])
                 trading_day_count = int(
                     conn.execute("SELECT COUNT(DISTINCT DATE(timestamp)) FROM {}".format(table_name)).fetchone()[0]
@@ -363,6 +442,8 @@ def main() -> int:
                 )
 
         print("fake_rows_total={}".format(total_fake_rows))
+        print("synthetic_rows_total={}".format(total_synthetic_rows))
+        print("synthetic_days_total={}".format(total_synthetic_days))
         print("runtime_partitions={}".format(total_partitions))
         print("runtime_rows_total={}".format(total_runtime_rows))
     finally:

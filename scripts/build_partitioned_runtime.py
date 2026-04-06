@@ -12,12 +12,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+import numpy as np  # noqa: E402
+
 from legacy_minute_data_builder import (  # noqa: E402
     EXPECTED_1M_BARS_PER_DAY,
     delete_symbol_rows,
     ensure_normalized_table,
     ensure_price_table,
     load_minute_rows_for_symbol,
+    rebuild_basic_1min_for_symbol,
     rebuild_synthetic_1min_for_symbol,
     rebuild_stretch_1min_for_symbol,
     refresh_normalized_daily_data,
@@ -33,6 +36,7 @@ DEFAULT_RUNTIME_PREFIX = "stock_1_min_runtime_p"
 DEFAULT_NORMALIZED_TABLE = "normalized_daily_ohlc"
 DEFAULT_FAKE_TABLE = "stock_1_min_fake"
 DEFAULT_MOCK_TABLE = "stock_1_min_mock"
+DEFAULT_FIVE_MIN_TABLE = "stock_5_min"
 DEFAULT_SYNTHETIC_TABLE = "stock_1_min_synthetic"
 DEFAULT_DAILY_TABLE = "stock_daily"
 
@@ -51,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", default=None, help="Comma-separated symbols. Default: all symbols in local daily table within window.")
     parser.add_argument("--daily-table", default=DEFAULT_DAILY_TABLE)
     parser.add_argument("--mock-table", default=DEFAULT_MOCK_TABLE)
+    parser.add_argument("--five-min-table", default=DEFAULT_FIVE_MIN_TABLE)
     parser.add_argument("--fake-table", default=DEFAULT_FAKE_TABLE)
     parser.add_argument("--synthetic-table", default=DEFAULT_SYNTHETIC_TABLE)
     parser.add_argument("--normalized-table", default=DEFAULT_NORMALIZED_TABLE)
@@ -66,6 +71,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tolerance", type=float, default=0.5)
     parser.add_argument("--tolerance-step", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--generate-mock-from-5min",
+        action="store_true",
+        default=True,
+        help="Generate stock_1_min_mock locally from stock_5_min instead of requiring it from Turso.",
+    )
+    parser.add_argument(
+        "--no-generate-mock-from-5min",
+        action="store_false",
+        dest="generate_mock_from_5min",
+        help="Skip local 1-min mock generation; assume stock_1_min_mock already exists.",
+    )
     return parser.parse_args()
 
 
@@ -264,6 +281,7 @@ def main() -> int:
     )
     daily_table = validate_identifier(args.daily_table, "daily_table")
     mock_table = validate_identifier(args.mock_table, "mock_table")
+    five_min_table = validate_identifier(args.five_min_table, "five_min_table")
     fake_table = validate_identifier(args.fake_table, "fake_table")
     synthetic_table = validate_identifier(args.synthetic_table, "synthetic_table")
     registry_table = validate_identifier(args.registry_table, "registry_table")
@@ -272,6 +290,7 @@ def main() -> int:
     conn = sqlite3.connect(sqlite_path)
     try:
         ensure_price_table(conn, daily_table)
+        ensure_price_table(conn, five_min_table)
         ensure_price_table(conn, mock_table)
         ensure_price_table(conn, fake_table)
         ensure_price_table(conn, synthetic_table)
@@ -287,6 +306,25 @@ def main() -> int:
             requested_symbols=symbols_arg,
         )
         print("resolved symbols={}".format(len(symbols)))
+
+        if args.generate_mock_from_5min:
+            np_rng = np.random.default_rng(args.seed)
+            total_mock_rows = 0
+            for index, symbol in enumerate(symbols, start=1):
+                inserted = rebuild_basic_1min_for_symbol(
+                    conn=conn,
+                    symbol=symbol,
+                    five_min_table=five_min_table,
+                    one_min_table=mock_table,
+                    rng=np_rng,
+                )
+                total_mock_rows += inserted
+                print(
+                    "[{}/{}] {} mock_rows_from_5min={}".format(
+                        index, len(symbols), symbol, inserted
+                    )
+                )
+            print("mock_rows_from_5min_total={}".format(total_mock_rows))
 
         normalized_rows = refresh_normalized_daily_data(
             conn=conn,

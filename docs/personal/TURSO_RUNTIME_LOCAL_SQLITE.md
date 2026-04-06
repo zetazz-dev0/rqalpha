@@ -11,11 +11,16 @@
 目标数据流:
 
 ```text
-Turso(stock_daily, stock_5_min, stock_1_min_mock)
+Turso(stock_daily, stock_5_min)
   -> 本地 sqlite 缓存
+  -> 本地从 stock_5_min 生成 stock_1_min_mock
   -> 本地 stretch 生成 stock_1_min_fake
   -> 本地 runtime 分区表(按 date + symbol)
 ```
+
+注意: `stock_1_min_mock` 不再从 Turso 拉取，而是在本地从 `stock_5_min` 生成，以减少云数据库查询量。
+如果需要恢复旧行为（从 Turso 拉取 `stock_1_min_mock`），可以在拉取时显式指定 `--tables stock_daily,stock_5_min,stock_1_min_mock`，
+并在生成 runtime 时加 `--no-generate-mock-from-5min`。
 
 这里的 runtime 分区不是单一大表，而是:
 
@@ -61,14 +66,15 @@ python scripts/pull_turso_source_tables.py \
   --sqlite-path outputs/minute_data/stock_data.db \
   --from-date 2024-03-28 \
   --to-date 2026-03-27 \
-  --tables stock_daily,stock_5_min,stock_1_min_mock \
   --batch-size 5000
 ```
 
 说明:
 
+- 默认只拉取 `stock_daily` 和 `stock_5_min`（不再拉取 `stock_1_min_mock`）
+- `stock_1_min_mock` 会在第二步由 `build_partitioned_runtime.py` 从本地 `stock_5_min` 自动生成
+- 如需额外拉取 `stock_1_min_mock`，请手动指定 `--tables stock_daily,stock_5_min,stock_1_min_mock`
 - 默认从远端 `stock_daily` 自动解析 symbol 列表
-- 会把 Turso 中这三张表的数据写进本地 sqlite
 - 写入方式是 `INSERT OR REPLACE`
 - 如果目标 sqlite 不存在，会自动创建
 
@@ -78,9 +84,7 @@ python scripts/pull_turso_source_tables.py \
 sqlite3 outputs/minute_data/stock_data.db "
 SELECT 'stock_daily', COUNT(*) FROM stock_daily
 UNION ALL
-SELECT 'stock_5_min', COUNT(*) FROM stock_5_min
-UNION ALL
-SELECT 'stock_1_min_mock', COUNT(*) FROM stock_1_min_mock;
+SELECT 'stock_5_min', COUNT(*) FROM stock_5_min;
 "
 ```
 
@@ -99,13 +103,14 @@ python scripts/build_partitioned_runtime.py \
 
 脚本内部会做这些事:
 
-1. 读取本地 `stock_daily`
-2. 使用本地 `stock_1_min_mock` 作为 stretch 模板
-3. 生成本地 `stock_1_min_fake`
-4. 生成本地 `stock_1_min_synthetic`
-5. 以 `synthetic -> fake -> mock` 的顺序写入 runtime 分区表
-6. 用 `mock` 覆盖同 `(symbol, timestamp)` 的 `fake/synthetic`
-7. 维护一张注册表 `runtime_partition_registry`
+1. 从本地 `stock_5_min` 生成 `stock_1_min_mock`（默认开启，可用 `--no-generate-mock-from-5min` 跳过）
+2. 读取本地 `stock_daily`
+3. 使用本地 `stock_1_min_mock` 作为 stretch 模板
+4. 生成本地 `stock_1_min_fake`
+5. 生成本地 `stock_1_min_synthetic`
+6. 以 `synthetic -> fake -> mock` 的顺序写入 runtime 分区表
+7. 用 `mock` 覆盖同 `(symbol, timestamp)` 的 `fake/synthetic`
+8. 维护一张注册表 `runtime_partition_registry`
 
 其中 runtime 的优先级是:
 
@@ -163,7 +168,6 @@ python scripts/pull_turso_source_tables.py \
   --sqlite-path outputs/minute_data/stock_data.db \
   --from-date 2024-03-28 \
   --to-date 2026-03-27 \
-  --tables stock_daily,stock_5_min,stock_1_min_mock \
   --batch-size 5000
 ```
 
@@ -188,7 +192,7 @@ SELECT 'stock_daily', COUNT(*) FROM stock_daily
 UNION ALL
 SELECT 'stock_5_min', COUNT(*) FROM stock_5_min
 UNION ALL
-SELECT 'stock_1_min_mock', COUNT(*) FROM stock_1_min_mock
+SELECT 'stock_1_min_mock (locally generated)', COUNT(*) FROM stock_1_min_mock
 UNION ALL
 SELECT 'stock_1_min_fake', COUNT(*) FROM stock_1_min_fake;
 "

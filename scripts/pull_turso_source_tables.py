@@ -13,6 +13,7 @@ import libsql_client
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "outputs", "minute_data", "stock_data.db")
 TABLE_NAMES = ("stock_daily", "stock_5_min", "stock_1_min_mock")
+DEFAULT_TABLE_NAMES = ("stock_daily", "stock_5_min")
 ROW_COLUMNS = ("symbol", "timestamp", "open", "high", "low", "close", "volume")
 
 
@@ -51,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--sqlite-path", default=DEFAULT_SQLITE_PATH)
-    parser.add_argument("--tables", default=",".join(TABLE_NAMES))
+    parser.add_argument("--tables", default=",".join(DEFAULT_TABLE_NAMES))
     parser.add_argument("--symbols", default=None, help="Comma-separated symbols. Default: all symbols in remote stock_daily within window.")
     parser.add_argument("--from-date", default=None, help="Inclusive start date, YYYY-MM-DD.")
     parser.add_argument("--to-date", default=None, help="Inclusive end date, YYYY-MM-DD.")

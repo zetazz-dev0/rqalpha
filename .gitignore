@@ -25,3 +25,5 @@ rqalpha_test_coverage_report/
 rqalpha/_version.py
 
 .claude/settings.local.json
+
+outputs/minute_data

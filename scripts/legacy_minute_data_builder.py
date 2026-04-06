@@ -1434,7 +1434,10 @@ def main():
     parser.add_argument(
         "--runtime-table",
         default="stock_1_min_runtime",
-        help="Merged runtime 1m table. Priority: basic > stretch > synthetic.",
+        help=(
+            "Legacy merged runtime 1m single table. Priority: basic > stretch > synthetic. "
+            "For partitioned runtime, use scripts/build_partitioned_runtime.py."
+        ),
     )
     parser.add_argument(
         "--daily-table",

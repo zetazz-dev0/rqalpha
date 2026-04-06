@@ -27,3 +27,4 @@ rqalpha/_version.py
 .claude/settings.local.json
 
 outputs/minute_data
+outputs/turso_runtime

@@ -158,6 +158,14 @@ PY
 
 [`scripts/sync_turso_source_tables.py`](/Users/zeta/Projects/zetazz-dev0/rqalpha/scripts/sync_turso_source_tables.py)
 
+如果要把 Turso 中的存量源数据拉回本地 sqlite，并在本地生成按 `date + symbol` 分区的 runtime，请看:
+
+[`docs/personal/TURSO_RUNTIME_LOCAL_SQLITE.md`](/Users/zeta/Projects/zetazz-dev0/rqalpha/docs/personal/TURSO_RUNTIME_LOCAL_SQLITE.md)
+
+如果要直接用这些分区 runtime 跑 RQAlpha 回测，并查看已经验证过的命令和踩坑记录，请看:
+
+[`docs/personal/PARTITIONED_RUNTIME_BACKTEST.md`](/Users/zeta/Projects/zetazz-dev0/rqalpha/docs/personal/PARTITIONED_RUNTIME_BACKTEST.md)
+
 它会把以下表同步到 Turso:
 
 - `stock_daily`

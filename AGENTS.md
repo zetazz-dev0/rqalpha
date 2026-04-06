@@ -42,11 +42,13 @@ Simulation modes:
 - `stretch`: generate 1m via similar-pattern matching + stretch (fallback synthetic data)
 - `both`: build both and merge to runtime table with priority `basic > stretch`
 
-Recommended runtime table:
-- `stock_1_min_runtime` (produced in `both` mode)
-- If same `(symbol, timestamp)` exists in both tables, runtime keeps `basic` row
-- `stock_1_min_runtime` is **runtime/backtest-only** and should be reset/refilled for the target date window.
-- **Never** backfill full-history simulated data into `stock_1_min_runtime` under any circumstance; this table must stay window-scoped to avoid explosive data volume.
+Recommended runtime storage:
+- partitioned runtime tables produced by `scripts/build_partitioned_runtime.py`
+- registry table: `runtime_partition_registry`
+- default partition naming: `stock_1_min_runtime_p_y<YYYY>_s<SYMBOL>`
+- If same `(symbol, timestamp)` exists in both tables, runtime keeps the `basic/mock` row
+- partitioned runtime is **runtime/backtest-only** and should be regenerated for the target date window.
+- **Never** backfill full-history simulated data into a single runtime table under any circumstance; runtime must stay window-scoped.
 
 ### Minute Build Commands
 
@@ -66,7 +68,7 @@ python scripts/legacy_minute_data_builder.py \
   --stretch-source-table stock_1_min_mock \
   --stretch-output-table stock_1_min_fake
 
-# 3) Recommended: both mode (runtime priority: basic > stretch)
+# 3) Legacy single-table merge (runtime priority: basic > stretch)
 python scripts/legacy_minute_data_builder.py \
   --sqlite-path /path/to/stock_data.db \
   --symbols 600519,000725 \
@@ -75,6 +77,14 @@ python scripts/legacy_minute_data_builder.py \
   --one-min-table stock_1_min_mock \
   --stretch-output-table stock_1_min_fake \
   --runtime-table stock_1_min_runtime
+
+# 4) Recommended current flow: build partitioned runtime by date + symbol
+python scripts/build_partitioned_runtime.py \
+  --sqlite-path /path/to/stock_data.db \
+  --from-date 2024-03-27 \
+  --to-date 2026-03-27 \
+  --date-partition year \
+  --runtime-prefix stock_1_min_runtime_p
 ```
 
 ### Runtime Validation Before Backtest
@@ -84,13 +94,14 @@ Always validate runtime 1m coverage before running a backtest:
 ```bash
 python scripts/validate_minute_runtime_data.py \
   --sqlite-path /path/to/stock_data.db \
+  --runtime-registry-table runtime_partition_registry \
   --from-date 2024-03-27 \
   --to-date 2026-03-27
 ```
 
 Validation rules:
-- every daily trading day in the target window must exist in `stock_1_min_runtime`
-- each runtime symbol-day must have the expected number of minute bars
+- every daily trading day in the target window must exist in the partitioned runtime referenced by `runtime_partition_registry`
+- each runtime symbol-day must have the expected number of minute bars across all matching partitions
 - if validation fails, do not treat the backtest as trustworthy
 
 ### RQAlpha With Minute Data Source Mod
@@ -104,12 +115,13 @@ python -m rqalpha run \
   -mc legacy_1m_source.enabled True \
   -mc legacy_1m_source.lib rqalpha.examples.data_source.rqalpha_mod_legacy_1m_source \
   -mc legacy_1m_source.sqlite_path /path/to/stock_data.db \
-  -mc legacy_1m_source.minute_table stock_1_min_runtime
+  -mc legacy_1m_source.runtime_registry_table runtime_partition_registry
 ```
 
 Notes:
 - If environment has `rqalpha` executable in PATH, `rqalpha run ...` is equivalent to `python -m rqalpha run ...`.
-- `legacy_1m_source.minute_table` can be switched to `stock_1_min_mock` or `stock_1_min_fake` for mode-specific debugging.
+- In production/backtest mode, prefer `legacy_1m_source.runtime_registry_table runtime_partition_registry`.
+- `legacy_1m_source.minute_table` can still be switched to `stock_1_min_mock` or `stock_1_min_fake` for mode-specific debugging.
 
 ## Interval Cursor Analysis (Legacy Migration)
 

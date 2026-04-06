@@ -14,6 +14,7 @@ if PROJECT_ROOT not in sys.path:
 DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "outputs", "minute_data", "stock_data.db")
 DEFAULT_DAILY_TABLE = "stock_daily"
 DEFAULT_RUNTIME_TABLE = "stock_1_min_runtime"
+DEFAULT_RUNTIME_REGISTRY_TABLE = "runtime_partition_registry"
 DEFAULT_EXPECTED_BARS_PER_DAY = 240
 DEFAULT_SAMPLE_LIMIT = 10
 DEFAULT_MIN_TOTAL_VOLUME = 1.0
@@ -78,6 +79,27 @@ def fetch_runtime_day_counts(
     return {str(row[0]): int(row[1]) for row in rows}
 
 
+def fetch_runtime_partition_tables(
+    conn: sqlite3.Connection,
+    registry_table: str,
+    symbol: str,
+    from_date: str,
+    to_date: str,
+) -> List[str]:
+    rows = conn.execute(
+        """
+        SELECT table_name
+        FROM {table}
+        WHERE symbol = ?
+          AND from_date <= ?
+          AND to_date >= ?
+        ORDER BY from_date, partition_value, table_name
+        """.format(table=registry_table),
+        (symbol, to_date, from_date),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def fetch_runtime_day_volume_metrics(
     conn: sqlite3.Connection,
     table: str,
@@ -115,6 +137,80 @@ def fetch_runtime_day_volume_metrics(
     return metrics
 
 
+def fetch_partitioned_runtime_day_counts(
+    conn: sqlite3.Connection,
+    registry_table: str,
+    symbol: str,
+    from_date: str,
+    to_date: str,
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for table_name in fetch_runtime_partition_tables(conn, registry_table, symbol, from_date, to_date):
+        rows = conn.execute(
+            """
+            SELECT DATE(timestamp), COUNT(*)
+            FROM {table}
+            WHERE symbol = ?
+              AND DATE(timestamp) BETWEEN ? AND ?
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp)
+            """.format(table=table_name),
+            (symbol, from_date, to_date),
+        ).fetchall()
+        for trade_date, bar_count in rows:
+            trade_date = str(trade_date)
+            counts[trade_date] = counts.get(trade_date, 0) + int(bar_count)
+    return counts
+
+
+def fetch_partitioned_runtime_day_volume_metrics(
+    conn: sqlite3.Connection,
+    registry_table: str,
+    symbol: str,
+    from_date: str,
+    to_date: str,
+) -> Dict[str, Dict[str, float]]:
+    metrics: Dict[str, Dict[str, float]] = {}
+    for table_name in fetch_runtime_partition_tables(conn, registry_table, symbol, from_date, to_date):
+        rows = conn.execute(
+            """
+            SELECT
+                DATE(timestamp),
+                COUNT(*),
+                COALESCE(SUM(volume), 0),
+                COALESCE(SUM(CASE WHEN volume > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(MAX(volume), 0)
+            FROM {table}
+            WHERE symbol = ?
+              AND DATE(timestamp) BETWEEN ? AND ?
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp)
+            """.format(table=table_name),
+            (symbol, from_date, to_date),
+        ).fetchall()
+        for trade_date, bars, total_volume, nonzero_bars, max_volume in rows:
+            trade_date = str(trade_date)
+            state = metrics.setdefault(
+                trade_date,
+                {
+                    "bars": 0,
+                    "total_volume": 0.0,
+                    "nonzero_bars": 0,
+                    "max_bar_volume": 0.0,
+                    "max_bar_share": 0.0,
+                },
+            )
+            state["bars"] += int(bars)
+            state["total_volume"] += float(total_volume or 0.0)
+            state["nonzero_bars"] += int(nonzero_bars)
+            state["max_bar_volume"] = max(state["max_bar_volume"], float(max_volume or 0.0))
+
+    for state in metrics.values():
+        total_volume = float(state["total_volume"])
+        state["max_bar_share"] = (state["max_bar_volume"] / total_volume) if total_volume > 0 else 0.0
+    return metrics
+
+
 def summarize_symbol(
     conn: sqlite3.Connection,
     daily_table: str,
@@ -126,17 +222,34 @@ def summarize_symbol(
     min_total_volume: float,
     min_nonzero_bars: int,
     max_single_bar_volume_share: float,
+    runtime_registry_table: str | None,
 ) -> Dict[str, object]:
     db_symbol = normalize_db_symbol(symbol)
     daily_dates = fetch_daily_dates(conn, daily_table, symbol, from_date, to_date)
     if not daily_dates:
         daily_dates = fetch_daily_dates(conn, daily_table, db_symbol, from_date, to_date)
-    runtime_counts = fetch_runtime_day_counts(conn, runtime_table, symbol, from_date, to_date)
-    if not runtime_counts:
-        runtime_counts = fetch_runtime_day_counts(conn, runtime_table, db_symbol, from_date, to_date)
-    runtime_volume = fetch_runtime_day_volume_metrics(conn, runtime_table, symbol, from_date, to_date)
-    if not runtime_volume:
-        runtime_volume = fetch_runtime_day_volume_metrics(conn, runtime_table, db_symbol, from_date, to_date)
+    if runtime_registry_table:
+        runtime_counts = fetch_partitioned_runtime_day_counts(
+            conn, runtime_registry_table, symbol, from_date, to_date
+        )
+        if not runtime_counts:
+            runtime_counts = fetch_partitioned_runtime_day_counts(
+                conn, runtime_registry_table, db_symbol, from_date, to_date
+            )
+        runtime_volume = fetch_partitioned_runtime_day_volume_metrics(
+            conn, runtime_registry_table, symbol, from_date, to_date
+        )
+        if not runtime_volume:
+            runtime_volume = fetch_partitioned_runtime_day_volume_metrics(
+                conn, runtime_registry_table, db_symbol, from_date, to_date
+            )
+    else:
+        runtime_counts = fetch_runtime_day_counts(conn, runtime_table, symbol, from_date, to_date)
+        if not runtime_counts:
+            runtime_counts = fetch_runtime_day_counts(conn, runtime_table, db_symbol, from_date, to_date)
+        runtime_volume = fetch_runtime_day_volume_metrics(conn, runtime_table, symbol, from_date, to_date)
+        if not runtime_volume:
+            runtime_volume = fetch_runtime_day_volume_metrics(conn, runtime_table, db_symbol, from_date, to_date)
 
     runtime_dates = set(runtime_counts.keys())
     missing_dates = sorted(daily_dates - runtime_dates)
@@ -193,6 +306,14 @@ def main() -> int:
     parser.add_argument("--symbols", default=",".join(load_default_universe()))
     parser.add_argument("--daily-table", default=DEFAULT_DAILY_TABLE)
     parser.add_argument("--runtime-table", default=DEFAULT_RUNTIME_TABLE)
+    parser.add_argument(
+        "--runtime-registry-table",
+        default=None,
+        help=(
+            "Optional runtime partition registry table. When set, validation reads "
+            "partitioned runtime tables from this registry instead of a single --runtime-table."
+        ),
+    )
     parser.add_argument("--from-date", required=True)
     parser.add_argument("--to-date", required=True)
     parser.add_argument("--expected-bars-per-day", type=int, default=DEFAULT_EXPECTED_BARS_PER_DAY)
@@ -221,6 +342,7 @@ def main() -> int:
                 min_total_volume=args.min_total_volume,
                 min_nonzero_bars=args.min_nonzero_bars,
                 max_single_bar_volume_share=args.max_single_bar_volume_share,
+                runtime_registry_table=args.runtime_registry_table,
             )
             for symbol in symbols
         ]

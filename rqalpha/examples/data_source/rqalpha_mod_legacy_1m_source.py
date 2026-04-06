@@ -22,8 +22,10 @@ __config__ = {
     # Path of minute sqlite db. Example:
     # /path/to/rqalpha/outputs/minute_data/stock_data.db
     "sqlite_path": None,
-    # Minute table generated from legacy 5m -> 1m mock logic.
+    # Single minute table generated from legacy 5m -> 1m mock logic.
     "minute_table": "stock_1_min_mock",
+    # Optional registry table for partitioned runtime minute tables.
+    "runtime_registry_table": None,
 }
 
 
@@ -62,11 +64,23 @@ class LegacyMinuteDataSource(BaseDataSource):
         INSTRUMENT_TYPE.PUBLIC_FUND,
     }
 
-    def __init__(self, base_config, sqlite_path: str, minute_table: str = "stock_1_min_mock"):
+    def __init__(
+        self,
+        base_config,
+        sqlite_path: str,
+        minute_table: str = "stock_1_min_mock",
+        runtime_registry_table: Optional[str] = None,
+    ):
         super(LegacyMinuteDataSource, self).__init__(base_config)
         self._sqlite_path = os.path.abspath(sqlite_path)
         self._minute_table = _validate_identifier(minute_table, "minute_table")
+        self._runtime_registry_table = (
+            _validate_identifier(runtime_registry_table, "runtime_registry_table")
+            if runtime_registry_table
+            else None
+        )
         self._minute_cache: Dict[str, np.ndarray] = {}
+        self._partition_tables_cache: Dict[str, Tuple[str, ...]] = {}
         self._minute_range_cache: Optional[Tuple[date, date]] = None
         self._validate_source()
 
@@ -75,6 +89,47 @@ class LegacyMinuteDataSource(BaseDataSource):
             raise RuntimeError("Minute source sqlite not found: {}".format(self._sqlite_path))
 
         with sqlite3.connect(self._sqlite_path) as conn:
+            if self._runtime_registry_table:
+                registry_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (self._runtime_registry_table,),
+                ).fetchone()
+                if registry_exists is None:
+                    raise RuntimeError(
+                        "Runtime registry table '{}' not found in sqlite: {}".format(
+                            self._runtime_registry_table, self._sqlite_path
+                        )
+                    )
+                registry_count = conn.execute(
+                    "SELECT COUNT(1) FROM {}".format(self._runtime_registry_table)
+                ).fetchone()[0]
+                if registry_count <= 0:
+                    raise RuntimeError(
+                        "Runtime registry table '{}' has no rows in sqlite: {}".format(
+                            self._runtime_registry_table, self._sqlite_path
+                        )
+                    )
+                missing_tables = conn.execute(
+                    """
+                    SELECT DISTINCT r.table_name
+                    FROM {registry_table} r
+                    LEFT JOIN sqlite_master m
+                      ON m.type = 'table'
+                     AND m.name = r.table_name
+                    WHERE m.name IS NULL
+                    ORDER BY r.table_name
+                    LIMIT 5
+                    """.format(registry_table=self._runtime_registry_table)
+                ).fetchall()
+                if missing_tables:
+                    raise RuntimeError(
+                        "Partition table(s) missing from sqlite {}: {}".format(
+                            self._sqlite_path,
+                            ", ".join(str(row[0]) for row in missing_tables),
+                        )
+                    )
+                return
+
             table_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                 (self._minute_table,),
@@ -100,15 +155,57 @@ class LegacyMinuteDataSource(BaseDataSource):
     def _symbol_from_instrument(instrument) -> str:
         return instrument.order_book_id.split(".")[0]
 
+    def _get_partition_tables(self, symbol: str) -> Tuple[str, ...]:
+        if not self._runtime_registry_table:
+            return tuple()
+        if symbol not in self._partition_tables_cache:
+            with sqlite3.connect(self._sqlite_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT table_name
+                    FROM {registry_table}
+                    WHERE symbol = ?
+                    ORDER BY from_date, partition_value, table_name
+                    """.format(registry_table=self._runtime_registry_table),
+                    (symbol,),
+                ).fetchall()
+            self._partition_tables_cache[symbol] = tuple(
+                _validate_identifier(str(row[0]), "partition_table")
+                for row in rows
+            )
+        return self._partition_tables_cache[symbol]
+
     def _load_minute_bars(self, symbol: str) -> np.ndarray:
-        query = """
-            SELECT timestamp, open, high, low, close, volume
-            FROM {table}
-            WHERE symbol = ?
-            ORDER BY timestamp
-        """.format(table=self._minute_table)
-        with sqlite3.connect(self._sqlite_path) as conn:
-            df = pd.read_sql_query(query, conn, params=(symbol,))
+        if self._runtime_registry_table:
+            tables = self._get_partition_tables(symbol)
+            if not tables:
+                return np.array([], dtype=self.MINUTE_DTYPE)
+
+            frames = []
+            with sqlite3.connect(self._sqlite_path) as conn:
+                for table_name in tables:
+                    query = """
+                        SELECT timestamp, open, high, low, close, volume
+                        FROM {table}
+                        WHERE symbol = ?
+                        ORDER BY timestamp
+                    """.format(table=table_name)
+                    df = pd.read_sql_query(query, conn, params=(symbol,))
+                    if not df.empty:
+                        frames.append(df)
+            if not frames:
+                return np.array([], dtype=self.MINUTE_DTYPE)
+            df = pd.concat(frames, ignore_index=True)
+            df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+        else:
+            query = """
+                SELECT timestamp, open, high, low, close, volume
+                FROM {table}
+                WHERE symbol = ?
+                ORDER BY timestamp
+            """.format(table=self._minute_table)
+            with sqlite3.connect(self._sqlite_path) as conn:
+                df = pd.read_sql_query(query, conn, params=(symbol,))
 
         if df.empty:
             return np.array([], dtype=self.MINUTE_DTYPE)
@@ -256,10 +353,19 @@ class LegacyMinuteDataSource(BaseDataSource):
             return self._minute_range_cache
 
         with sqlite3.connect(self._sqlite_path) as conn:
-            row = conn.execute(
-                "SELECT MIN(timestamp), MAX(timestamp) FROM {}".format(self._minute_table)
-            ).fetchone()
+            if self._runtime_registry_table:
+                row = conn.execute(
+                    "SELECT MIN(from_date), MAX(to_date) FROM {}".format(self._runtime_registry_table)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT MIN(timestamp), MAX(timestamp) FROM {}".format(self._minute_table)
+                ).fetchone()
         if row is None or row[0] is None or row[1] is None:
+            if self._runtime_registry_table:
+                raise RuntimeError(
+                    "No minute data found in runtime registry '{}'".format(self._runtime_registry_table)
+                )
             raise RuntimeError("No minute data found in table '{}'".format(self._minute_table))
 
         start = pd.Timestamp(row[0]).date()
@@ -278,11 +384,13 @@ class LegacyMinuteDataSourceMod(AbstractMod):
             )
 
         minute_table = getattr(mod_config, "minute_table", "stock_1_min_mock")
+        runtime_registry_table = getattr(mod_config, "runtime_registry_table", None)
         env.set_data_source(
             LegacyMinuteDataSource(
                 env.config.base,
                 sqlite_path=sqlite_path,
                 minute_table=minute_table,
+                runtime_registry_table=runtime_registry_table,
             )
         )
 
